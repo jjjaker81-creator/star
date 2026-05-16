@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D 圣诞树粒子特效</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: #000000;
+            overflow: hidden;
+            font-family: 'Arial', sans-serif;
+        }
+
+        #canvas {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+        }
+
+        #info {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            color: #ffd700;
+            font-size: 14px;
+            z-index: 100;
+            background: rgba(0,0,0,0.7);
+            padding: 15px 20px;
+            border-radius: 10px;
+            border: 1px solid rgba(255,215,0,0.3);
+        }
+
+        #mode-indicator {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            color: #ffd700;
+            font-size: 18px;
+            font-weight: bold;
+            z-index: 100;
+            background: rgba(0,0,0,0.7);
+            padding: 15px 30px;
+            border-radius: 10px;
+            border: 1px solid rgba(255,215,0,0.3);
+            text-shadow: 0 0 10px #ffd700;
+        }
+
+        #camera-preview {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            width: 240px;
+            height: 180px;
+            border-radius: 10px;
+            border: 2px solid rgba(255,215,0,0.5);
+            z-index: 100;
+            background: #111;
+        }
+
+        #loading {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #ffd700;
+            font-size: 24px;
+            z-index: 200;
+            text-shadow: 0 0 20px #ffd700;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="info">
+        <p>🎄 3D 圣诞树粒子特效</p>
+        <p>📸 摄像头开启中...</p>
+    </div>
+    <div id="mode-indicator">模式: 聚合模式</div>
+    <div id="loading">加载中...</div>
+    <video id="camera-preview" autoplay playsinline></video>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+        // MediaPipe Vision
+        const vision = new window.FilesetResolver({
+            wasmPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm/'
+        });
+
+        let gestureDetector = null;
+        let currentMode = 'gather'; // 'gather' or 'stardust'
+        let handDetected = false;
+        let isOpenPalm = false;
+
+        // Three.js Setup
+        const canvas = document.getElementById('canvas');
+        const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.setClearColor(0x000000);
+
+        const scene = new THREE.Scene();
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 2, 8);
+        camera.lookAt(0, 1, 0);
+
+        // Bloom Effect
+        const composer = new EffectComposer(renderer);
+        const renderPass = new RenderPass(scene, camera);
+        composer.addPass(renderPass);
+
+        const bloomPass = new UnrealBloomPass(
+            new THREE.Vector2(window.innerWidth, window.innerHeight),
+            1.5, // strength
+            0.4, // radius
+            0.85 // threshold
+        );
+        composer.addPass(bloomPass);
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0x222222);
+        scene.add(ambientLight);
+
+        const pointLight1 = new THREE.PointLight(0xffd700, 2, 50);
+        pointLight1.position.set(0, 5, 0);
+        scene.add(pointLight1);
+
+        const pointLight2 = new THREE.PointLight(0x228b22, 1.5, 30);
+        pointLight2.position.set(-3, 2, 3);
+        scene.add(pointLight2);
+
+        // Particle Systems
+        const decorativeParticles = [];
+        const snowParticles = [];
+        const photoParticles = [];
+
+        // Decorative Particles (2000 total - cubes, spheres, candy canes)
+        const particleCount = 2000;
+        const particleColors = [0xffd700, 0x228b22, 0xff0000]; // gold, green, red
+        const particleGeometries = [
+            new THREE.BoxGeometry(0.08, 0.08, 0.08),
+            new THREE.SphereGeometry(0.05, 8, 8),
+            new THREE.CapsuleGeometry(0.03, 0.12, 4, 8)
+        ];
+
+        for (let i = 0; i < particleCount; i++) {
+            const geo = particleGeometries[Math.floor(Math.random() * particleGeometries.length)];
+            const mat = new THREE.MeshStandardMaterial({
+                color: particleColors[Math.floor(Math.random() * particleColors.length)],
+                emissive: particleColors[Math.floor(Math.random() * particleColors.length)],
+                emissiveIntensity: 0.3,
+                metalness: 0.8,
+                roughness: 0.2
+            });
+            const mesh = new THREE.Mesh(geo, mat);
+
+            // Initial random position
+            mesh.position.set(
+                (Math.random() - 0.5) * 15,
+                Math.random() * 10,
+                (Math.random() - 0.5) * 15
+            );
+            mesh.rotation.set(
+                Math.random() * Math.PI * 2,
+                Math.random() * Math.PI * 2,
+                Math.random() * Math.PI * 2
+            );
+
+            mesh.userData = {
+                originalPos: mesh.position.clone(),
+                targetPos: mesh.position.clone(),
+                velocity: new THREE.Vector3(),
+                speed: 0.02 + Math.random() * 0.03
+            };
+
+            decorativeParticles.push(mesh);
+            scene.add(mesh);
+        }
+
+        // Snow Particles
+        const snowCount = 500;
+        const snowGeo = new THREE.SphereGeometry(0.03, 6, 6);
+        const snowMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+
+        for (let i = 0; i < snowCount; i++) {
+            const snow = new THREE.Mesh(snowGeo, snowMat);
+            snow.position.set(
+                (Math.random() - 0.5) * 20,
+                Math.random() * 15,
+                (Math.random() - 0.5) * 20
+            );
+            snow.userData = {
+                fallSpeed: 0.01 + Math.random() * 0.02,
+                windOffset: Math.random() * Math.PI * 2
+            };
+            snowParticles.push(snow);
+            scene.add(snow);
+        }
+
+        // Photo Particles (for stardust mode)
+        const photoCount = 50;
+        const photoGeo = new THREE.PlaneGeometry(0.4, 0.5);
+
+        for (let i = 0; i < photoCount; i++) {
+            const canvas2d = document.createElement('canvas');
+            canvas2d.width = 64;
+            canvas2d.height = 80;
+            const ctx = canvas2d.getContext('2d');
+
+            // Create photo-like gradient
+            const gradient = ctx.createLinearGradient(0, 0, 0, 80);
+            const hue = Math.random() * 360;
+            gradient.addColorStop(0, `hsl(${hue}, 70%, 60%)`);
+            gradient.addColorStop(1, `hsl(${(hue + 30) % 360}, 70%, 40%)`);
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, 64, 80);
+
+            const texture = new THREE.CanvasTexture(canvas2d);
+            const mat = new THREE.MeshBasicMaterial({
+                map: texture,
+                side: THREE.DoubleSide,
+                transparent: true,
+                opacity: 0.9
+            });
+
+            const mesh = new THREE.Mesh(photoGeo, mat);
+            mesh.position.set(
+                (Math.random() - 0.5) * 5,
+                (Math.random() - 0.5) * 5,
+                (Math.random() - 0.5) * 5 + 5
+            );
+            mesh.visible = false;
+            mesh.userData = {
+                spiralIndex: i,
+                targetPos: new THREE.Vector3(),
+                baseScale: 1
+            };
+
+            photoParticles.push(mesh);
+            scene.add(mesh);
+        }
+
+        // Christmas tree target positions
+        function getTreePosition(index) {
+            const height = 5;
+            const progress = index / particleCount;
+            const y = progress * height;
+            const radius = (1 - progress) * 2;
+            const angle = progress * Math.PI * 8;
+
+            return new THREE.Vector3(
+                Math.cos(angle) * radius,
+                y,
+                Math.sin(angle) * radius
+            );
+        }
+
+        // Golden spiral for photos
+        function getGoldenSpiralPosition(index, time) {
+            const phi = (1 + Math.sqrt(5)) / 2; // Golden ratio
+            const angle = index * 2.39996 + time * 0.5;
+            const radius = Math.sqrt(index) * 0.15 + 0.5;
+
+            return new THREE.Vector3(
+                Math.cos(angle) * radius,
+                (index / photoCount) * 4 - 2,
+                Math.sin(angle) * radius + 3
+            );
+        }
+
+        // Camera setup for MediaPipe
+        const video = document.getElementById('camera-preview');
+        let handLandmarker = null;
+
+        async function setupCamera() {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { width: 640, height: 480 }
+            });
+            video.srcObject = stream;
+
+            await new Promise(resolve => video.onloadedmetadata = resolve);
+            video.play();
+
+            document.getElementById('loading').style.display = 'none';
+        }
+
+        async function setupMediaPipe() {
+            try {
+                const { HandLandmarker } = await window.HandLandmarker;
+
+                handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands_landmarker.task',
+                        delegate: 'GPU'
+                    },
+                    runningMode: 'VIDEO',
+                    numHands: 1
+                });
+
+                await setupCamera();
+                detectHand();
+            } catch (e) {
+                console.error('MediaPipe setup failed:', e);
+                document.getElementById('loading').textContent = '手势检测初始化失败，使用键盘控制';
+                document.getElementById('loading').style.display = 'block';
+                setTimeout(() => document.getElementById('loading').style.display = 'none', 3000);
+            }
+        }
+
+        function detectHand() {
+            if (handLandmarker && video.readyState >= 2) {
+                const results = handLandmarker.detectForVideo(video, performance.now());
+
+                if (results.landmarks && results.landmarks.length > 0) {
+                    handDetected = true;
+                    const landmarks = results.landmarks[0];
+
+                    // Check if palm is open (all fingers extended)
+                    const fingerTips = [8, 12, 16, 20];
+                    const fingerBases = [5, 9, 13, 17];
+
+                    let fingersOpen = 0;
+                    for (let i = 0; i < 4; i++) {
+                        const tipY = landmarks[fingerTips[i]].y;
+                        const baseY = landmarks[fingerBases[i]].y;
+                        if (tipY < baseY) fingersOpen++;
+                    }
+
+                    // Thumb check (horizontal)
+                    const thumbTip = landmarks[4];
+                    const thumbBase = landmarks[2];
+                    const pinkyBase = landmarks[17];
+                    const pinkyTip = landmarks[20];
+                    const handWidth = Math.abs(pinkyBase.x - pinkyTip.x);
+
+                    if (Math.abs(thumbTip.x - thumbBase.x) > handWidth * 0.5) {
+                        fingersOpen++;
+                    }
+
+                    isOpenPalm = fingersOpen >= 4;
+
+                    // Update mode based on gesture
+                    if (isOpenPalm) {
+                        setMode('stardust');
+                    } else {
+                        setMode('gather');
+                    }
+
+                    document.getElementById('info').innerHTML = `
+                        <p>🎄 3D 圣诞树粒子特效</p>
+                        <p>👋 手势: ${isOpenPalm ? '五指张开' : '握拳'}</p>
+                    `;
+                } else {
+                    handDetected = false;
+                    setMode('gather');
+                    document.getElementById('info').innerHTML = `
+                        <p>🎄 3D 圣诞树粒子特效</p>
+                        <p>📸 请将手伸入摄像头</p>
+                    `;
+                }
+            }
+
+            requestAnimationFrame(detectHand);
+        }
+
+        function setMode(mode) {
+            if (currentMode !== mode) {
+                currentMode = mode;
+                const indicator = document.getElementById('mode-indicator');
+
+                if (mode === 'gather') {
+                    indicator.textContent = '模式: 聚合模式';
+                    indicator.style.textShadow = '0 0 10px #228b22';
+                } else {
+                    indicator.textContent = '模式: 星尘模式';
+                    indicator.style.textShadow = '0 0 10px #ff6b6b';
+                }
+
+                // Mode transition effects
+                if (mode === 'stardust') {
+                    bloomPass.strength = 2.5;
+                    bloomPass.radius = 0.6;
+                } else {
+                    bloomPass.strength = 1.5;
+                    bloomPass.radius = 0.4;
+                }
+            }
+        }
+
+        // Animation
+        let time = 0;
+
+        function animate() {
+            requestAnimationFrame(animate);
+            time += 0.016;
+
+            // Update decorative particles
+            decorativeParticles.forEach((particle, i) => {
+                if (currentMode === 'gather') {
+                    // Spiral tree formation
+                    const target = getTreePosition(i);
+                    particle.userData.targetPos.copy(target);
+
+                    // Smooth lerp to target
+                    particle.position.lerp(particle.userData.targetPos, 0.05);
+                    particle.rotation.x += 0.01;
+                    particle.rotation.y += 0.02;
+                } else {
+                    // Stardust mode - explode and drift
+                    if (particle.position.length() < 15) {
+                        particle.userData.velocity.add(
+                            particle.position.clone().normalize().multiplyScalar(0.01)
+                        );
+                    }
+                    particle.position.add(particle.userData.velocity);
+                    particle.userData.velocity.multiplyScalar(0.98);
+                    particle.rotation.x += 0.05;
+                    particle.rotation.y += 0.03;
+                }
+
+                // Add subtle hover
+                if (currentMode === 'gather') {
+                    particle.position.y += Math.sin(time * 2 + i * 0.1) * 0.002;
+                }
+            });
+
+            // Update snow particles
+            snowParticles.forEach(snow => {
+                snow.position.y -= snow.userData.fallSpeed;
+                snow.position.x += Math.sin(time + snow.userData.windOffset) * 0.005;
+
+                if (snow.position.y < -5) {
+                    snow.position.y = 10;
+                    snow.position.x = (Math.random() - 0.5) * 20;
+                }
+            });
+
+            // Update photo particles
+            if (currentMode === 'stardust') {
+                photoParticles.forEach((photo, i) => {
+                    photo.visible = true;
+                    const target = getGoldenSpiralPosition(i, time);
+                    photo.position.lerp(target, 0.03);
+                    photo.rotation.y = time * 0.5;
+                    photo.lookAt(camera.position);
+
+                    // Scale up (4.5x)
+                    const targetScale = 4.5;
+                    photo.scale.lerp(new THREE.Vector3(targetScale, targetScale, targetScale), 0.05);
+                });
+            } else {
+                photoParticles.forEach(photo => {
+                    photo.visible = false;
+                    photo.scale.set(0.1, 0.1, 0.1);
+                });
+            }
+
+            // Camera orbit
+            const orbitSpeed = currentMode === 'gather' ? 0.001 : 0.002;
+            camera.position.x = Math.sin(time * orbitSpeed) * 8;
+            camera.position.z = Math.cos(time * orbitSpeed) * 8;
+            camera.lookAt(0, 1.5, 0);
+
+            // Light animation
+            pointLight1.intensity = 1.5 + Math.sin(time * 3) * 0.5;
+            pointLight2.intensity = 1 + Math.cos(time * 2) * 0.3;
+
+            composer.render();
+        }
+
+        // Handle resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Keyboard fallback
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'g' || e.key === 'G') {
+                setMode('gather');
+            } else if (e.key === 's' || e.key === 'S') {
+                setMode('stardust');
+            }
+        });
+
+        // Start
+        setupMediaPipe();
+        animate();
+    </script>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.js"></script>
+</body>
+</html>
